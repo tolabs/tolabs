@@ -1,0 +1,176 @@
+# applaunchpad的配置
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: applaunchpad-frontend-config
+  namespace: tolabs
+data:
+  config.yaml: |-
+    cloud:
+      domain: app.local.892048.xyz
+      port: 443
+      desktopDomain: local.892048.xyz
+      userDomains: 
+        - name: ""
+          secretName: local.892048.xyz-tls
+    common:
+      guideEnabled: false
+      apiEnabled: false
+    launchpad:
+      eventAnalyze:
+        enabled: false
+        fastGPTKey: ""
+      components:
+        monitor:
+          url: http://launchpad-monitor.tolabs.svc.cluster.local:8428
+        billing:
+          url: ""
+      appResourceFormSliderConfig:
+        default:
+          cpu: [100, 200, 500, 1000, 2000, 3000, 4000, 8000]
+          memory: [64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
+      fileManger:
+        uploadLimit: 50 # MB
+        downloadLimit: 100 # MB
+---
+# monitor的配置
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  labels:
+    app: applaunchpad-monitor
+  name: applaunchpad-monitor-config
+  namespace: tolabs
+data:
+  config.yml: |
+    server:
+      addr: ":8428"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: applaunchpad-frontend
+  namespace: tolabs
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: applaunchpad-frontend
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 25%
+      maxSurge: 25%
+  template:
+    metadata:
+      labels:
+        app: applaunchpad-frontend
+    spec:
+      serviceAccountName: sa-applaunchpad
+      containers:
+        - name: applaunchpad-frontend
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1001
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - "ALL"
+          resources:
+            limits:
+              cpu: 2000m
+              memory: 2048Mi
+            requests:
+              cpu: 10m
+              memory: 128Mi
+          image: docker-registry.local.892048.xyz/tolabs/applaunchpad-frontend:latest
+          imagePullPolicy: Always
+          volumeMounts:
+            - mountPath: /app/data/config.yaml
+              name: applaunchpad-frontend-volume
+              subPath: config.yaml
+        #---------
+        - args:
+            - /config/config.yml
+          command:
+            - /manager
+          env:
+            - name: VM_SERVICE_HOST
+              value: http://vmsingle-vmks-victoria-metrics-k8s-stack.vm.svc:8429
+          image: docker-registry.local.892048.xyz/tolabs/applaunchpad-monitor:latest
+          imagePullPolicy: Always
+          name: applaunchpad-monitor
+          ports:
+            - containerPort: 8428
+              protocol: TCP
+          resources:
+            limits:
+              cpu: 500m
+              memory: 1Gi
+            requests:
+              cpu: 5m
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            runAsNonRoot: true
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          volumeMounts:
+            - mountPath: /config
+              name: config-vol
+          #-------
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: "app"
+                  operator: In
+                  values:
+                  - applaunchpad-frontend
+              topologyKey: "kubernetes.io/hostname"
+      volumes:
+        - name: applaunchpad-frontend-volume
+          configMap:
+            name: applaunchpad-frontend-config
+        - name: config-vol
+          configMap:
+            defaultMode: 420
+            name: applaunchpad-monitor-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: applaunchpad-frontend
+  name: applaunchpad-frontend
+  namespace: tolabs
+spec:
+  ports:
+    - name: http
+      port: 3000
+      protocol: TCP
+      targetPort: 3000
+  selector:
+    app: applaunchpad-frontend
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: applaunchpad-monitor
+  name: applaunchpad-monitor
+  namespace: tolabs
+spec:
+  ports:
+    - name: http
+      port: 8428
+      protocol: TCP
+      targetPort: 8428
+  selector:
+    app: applaunchpad-monitor

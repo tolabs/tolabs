@@ -1,0 +1,251 @@
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: database-tls-issuer
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: database-webhook-ca
+  namespace: tolabs
+spec:
+  secretName: database-webhook-ca  # 证书存储的 Secret 名称
+  duration: 2160h                  # 证书有效期（90天）
+  renewBefore: 720h                # 到期前 30 天自动续期
+  issuerRef:
+    name: database-tls-issuer      # 引用 ClusterIssuer
+    kind: ClusterIssuer
+  dnsNames:
+    - database-monitor-webhook.tolabs.svc
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  labels:
+    app: database-monitor
+  name: database-monitor-config
+  namespace: tolabs
+data:
+  config.yml: |
+    server:
+      addr: ":9090"
+      webhookAddr: ":8443"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dbprovider-frontend-config
+  namespace: tolabs
+data:
+  config.yaml: |-
+    addr: :3000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dbprovider-frontend
+  namespace: tolabs
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: dbprovider-frontend
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 25%
+      maxSurge: 25%
+  template:
+    metadata:
+      labels:
+        app: dbprovider-frontend
+    spec:
+      serviceAccountName: cluster-version-reader
+      containers:
+        - name: dbprovider-frontend
+          env:
+            - name: SEALOS_DOMAIN
+              value: ""
+            - name: DESKTOP_DOMAIN
+              value: ""
+            - name: SEALOS_PORT
+              value: ""
+            - name: MONITOR_URL
+              value: http://database-monitor.tolabs.svc.cluster.local:9090
+            - name: MINIO_URL
+              value: ""
+            - name: MINIO_ACCESS_KEY
+              value: ""
+            - name: MINIO_SECRET_KEY
+              value: ""
+            - name: MIGRATE_FILE_IMAGE
+              value: ""
+            - name: MINIO_PORT
+              value: ""
+            - name: MINIO_BUCKET_NAME
+              value: ""
+            - name: BACKUP_ENABLED
+              value: "false"
+            - name: SHOW_DOCUMENT
+              value: "true"
+            - name: GUIDE_ENABLED
+              value: "true"
+            - name: BILLING_URL
+              value: ""
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1001
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - 'ALL'
+          resources:
+            limits:
+              cpu: 2000m
+              memory: 2048Mi
+            requests:
+              cpu: 10m
+              memory: 128Mi
+          # do not modify this image, it is used for CI/CD
+          image: docker-registry.local.892048.xyz/tolabs/dbprovider-frontend:latest
+          imagePullPolicy: Always
+          volumeMounts:
+            - name: dbprovider-frontend-volume
+              mountPath: /config.yaml
+              subPath: config.yaml
+        #----
+        - args:
+            - /config/config.yml
+          command:
+            - /manager
+          env:
+            - name: PROMETHEUS_SERVICE_HOST
+              value: http://vmsingle-vmks-victoria-metrics-k8s-stack.vm.svc.cluster.local:8429
+          image: docker-registry.local.892048.xyz/tolabs/dbprovider-monitor:latest
+          imagePullPolicy: Always
+          name: database-monitor
+          ports:
+            - name: http
+              containerPort: 9090
+              protocol: TCP
+            - name: webhook
+              containerPort: 8443
+              protocol: TCP
+          resources:
+            limits:
+              cpu: 500m
+              memory: 1024Mi
+            requests:
+              cpu: 5m
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            runAsNonRoot: true
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          volumeMounts:
+            - mountPath: /config
+              name: config-vol
+            - mountPath: /certs
+              name: certs
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: "app"
+                      operator: In
+                      values:
+                        - dbprovider-frontend
+                topologyKey: "kubernetes.io/hostname"
+      volumes:
+        - name: dbprovider-frontend-volume
+          configMap:
+            name: dbprovider-frontend-config
+        - name: certs
+          secret:
+            secretName: database-webhook-ca
+        - name: config-vol
+          configMap:
+            defaultMode: 420
+            name: database-monitor-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: dbprovider-frontend
+  name: dbprovider-frontend
+  namespace: tolabs
+spec:
+  ports:
+    - name: http
+      port: 3000
+      protocol: TCP
+      targetPort: 3000
+  selector:
+    app: dbprovider-frontend
+---
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: database-monitor
+  name: database-monitor
+  namespace: tolabs
+spec:
+  ports:
+    - name: http
+      port: 9090
+      protocol: TCP
+      targetPort: 9090
+  selector:
+    app: database-monitor
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: database-monitor-webhook
+  name: database-monitor-webhook
+  namespace: tolabs
+spec:
+  ports:
+    - name: webhook
+      port: 8443
+      protocol: TCP
+      targetPort: 8443
+  selector:
+    app: database-monitor
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: database-monitor-webhook
+  annotations:
+    cert-manager.io/inject-ca-from: tolabs/database-webhook-ca
+webhooks:
+  - name: database-monitor-webhook.tolabs.svc
+    clientConfig:
+      service:
+        name: database-monitor-webhook
+        namespace: tolabs
+        path: /webhook
+        port: 8443
+      caBundle: ""
+    rules:
+      - operations: ["CREATE", "UPDATE"]
+        apiGroups: [""]
+        apiVersions: ["v1"]
+        resources: ["services"]
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: Fail

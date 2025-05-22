@@ -1,0 +1,22 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: applaunchpad-frontend
+  namespace: tolabs
+spec:
+  ingressClassName: higress
+  rules:
+    - host: app.local.892048.xyz
+      http:
+        paths:
+          - pathType: Prefix
+            path: /
+            backend:
+              service:
+                name: applaunchpad-frontend
+                port:
+                  number: 3000
+  tls:
+    - hosts:
+        - app.local.892048.xyz
+      secretName: local.892048.xyz-tls
